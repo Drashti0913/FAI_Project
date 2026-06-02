@@ -1,0 +1,407 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans)}
+.dash{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 0}
+.card{background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:14px}
+.card-full{grid-column:1/-1}
+.label{font-size:11px;color:var(--color-text-secondary);letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
+.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+.metric{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 12px}
+.metric .val{font-size:22px;font-weight:500;color:var(--color-text-primary)}
+.metric .lbl{font-size:11px;color:var(--color-text-secondary);margin-bottom:2px}
+.metric .sub{font-size:11px;color:var(--color-text-secondary);margin-top:2px}
+.good{color:#1D9E75!important}
+.warn{color:#BA7517!important}
+.bad{color:#E24B4A!important}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:500}
+.badge-blue{background:#E6F1FB;color:#0C447C}
+.badge-green{background:#EAF3DE;color:#3B6D11}
+.badge-amber{background:#FAEEDA;color:#854F0B}
+.badge-gray{background:var(--color-background-secondary);color:var(--color-text-secondary)}
+.driver-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:0.5px solid var(--color-border-tertiary)}
+.driver-row:last-child{border-bottom:none}
+.driver-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.driver-name{font-size:13px;font-weight:500;color:var(--color-text-primary);min-width:60px}
+.queue-dots{display:flex;gap:3px;align-items:center}
+.q-dot{width:8px;height:8px;border-radius:2px}
+.q-filled{background:#378ADD}
+.q-empty{background:var(--color-border-tertiary)}
+.section-title{font-size:13px;font-weight:500;color:var(--color-text-primary);margin-bottom:10px}
+.tab-row{display:flex;gap:6px;margin-bottom:12px}
+.tab{padding:4px 12px;border-radius:var(--border-radius-md);font-size:12px;border:0.5px solid var(--color-border-secondary);cursor:pointer;background:transparent;color:var(--color-text-secondary)}
+.tab.active{background:var(--color-background-info);color:var(--color-text-info);border-color:transparent}
+.sim-controls{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.sim-controls select,.sim-controls button{font-size:12px}
+.order-list{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto}
+.order-item{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--color-background-secondary);border-radius:var(--border-radius-md);font-size:12px}
+.progress-bar{height:4px;background:var(--color-border-tertiary);border-radius:2px;margin-top:4px;overflow:hidden}
+.progress-fill{height:100%;border-radius:2px;transition:width .3s}
+.legend-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--color-text-secondary)}
+.legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.legend-sq{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:0.5px solid var(--color-border-tertiary);font-size:12px}
+.stat-row:last-child{border-bottom:none}
+.stat-lbl{color:var(--color-text-secondary)}
+.stat-val{font-weight:500;color:var(--color-text-primary)}
+</style>
+
+<h2 class="sr-only">Dynamic multi-order delivery optimization simulation dashboard showing city grid, driver positions, live metrics, and learning curves.</h2>
+
+<div class="metric-grid">
+  <div class="metric"><div class="lbl">Episode</div><div class="val">847</div><div class="sub">of 2000</div></div>
+  <div class="metric"><div class="lbl">Total reward</div><div class="val good">−312</div><div class="sub">vs −780 random</div></div>
+  <div class="metric"><div class="lbl">On-time</div><div class="val good">99%</div><div class="sub">49 / 50 orders</div></div>
+  <div class="metric"><div class="lbl">Sim time</div><div class="val">3h 12m</div><div class="sub">192 / 480 min</div></div>
+</div>
+
+<div class="dash">
+
+  <!-- City Grid -->
+  <div class="card">
+    <div class="section-title">City grid — live view</div>
+    <div class="sim-controls">
+      <select id="trafficSel" onchange="renderGrid()">
+        <option value="rush">Rush hour</option>
+        <option value="uniform">Uniform</option>
+        <option value="random">Random</option>
+      </select>
+      <button onclick="stepSim()">Step ▶</button>
+      <button onclick="autoRun()" id="autoBtn">Auto ▶▶</button>
+      <span id="timeLabel" style="font-size:11px;color:var(--color-text-secondary)">t = 192 min</span>
+    </div>
+    <canvas id="gridCanvas" width="280" height="280" style="display:block;margin:0 auto"></canvas>
+    <div class="legend-row">
+      <div class="legend-item"><div class="legend-dot" style="background:#378ADD"></div>Driver 0</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#1D9E75"></div>Driver 1</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#D85A30"></div>Driver 2</div>
+      <div class="legend-item"><div class="legend-sq" style="background:#EF9F27;opacity:.8"></div>Pending order</div>
+      <div class="legend-item"><div class="legend-sq" style="background:#E24B4A;opacity:.4;border-radius:0"></div>Rush zone</div>
+    </div>
+  </div>
+
+  <!-- Drivers Panel -->
+  <div class="card">
+    <div class="section-title">Driver status</div>
+    <div id="driverPanel"></div>
+
+    <div style="margin-top:14px">
+      <div class="section-title">Pending orders</div>
+      <div class="order-list" id="orderList"></div>
+    </div>
+  </div>
+
+  <!-- Traffic Heatmap -->
+  <div class="card">
+    <div class="section-title">Learned traffic — edge speeds by hour</div>
+    <canvas id="heatCanvas" width="295" height="80" style="display:block;width:100%"></canvas>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--color-text-secondary);margin-top:4px">
+      <span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span>
+    </div>
+    <div class="legend-row" style="margin-top:6px">
+      <div class="legend-item"><div class="legend-sq" style="background:#1D9E75"></div>Fast</div>
+      <div class="legend-item"><div class="legend-sq" style="background:#EF9F27"></div>Moderate</div>
+      <div class="legend-item"><div class="legend-sq" style="background:#E24B4A"></div>Congested</div>
+      <span style="font-size:10px;color:var(--color-text-secondary);margin-left:auto">▲ rush hours: 8–10am, 5–7pm</span>
+    </div>
+
+    <div style="margin-top:14px">
+      <div class="section-title">Episode stats</div>
+      <div class="stat-row"><span class="stat-lbl">Completed orders</span><span class="stat-val">49</span></div>
+      <div class="stat-row"><span class="stat-lbl">Missed deadlines</span><span class="stat-val bad">1</span></div>
+      <div class="stat-row"><span class="stat-lbl">Avg wait time</span><span class="stat-val">5.8 min</span></div>
+      <div class="stat-row"><span class="stat-lbl">Load balance σ</span><span class="stat-val">2.4</span></div>
+      <div class="stat-row"><span class="stat-lbl">States explored</span><span class="stat-val">212</span></div>
+      <div class="stat-row"><span class="stat-lbl">Epsilon (ε)</span><span class="stat-val">0.100</span></div>
+    </div>
+  </div>
+
+  <!-- Learning Curve -->
+  <div class="card">
+    <div class="section-title">Learning curve — reward over episodes</div>
+    <div class="tab-row">
+      <button class="tab active" onclick="switchChart('reward',this)">Reward</button>
+      <button class="tab" onclick="switchChart('ontime',this)">On-time %</button>
+      <button class="tab" onclick="switchChart('missed',this)">Missed</button>
+      <button class="tab" onclick="switchChart('wait',this)">Avg wait</button>
+    </div>
+    <div style="position:relative;height:180px"><canvas id="lcChart"></canvas></div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:11px">
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;background:#378ADD;display:inline-block"></span>RL Agent</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;background:#B4B2A9;display:inline-block;border-top:2px dashed #B4B2A9;background:none"></span>Random</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;border-top:2px dashed #1D9E75;display:inline-block"></span>Round robin</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:2px;border-top:2px dashed #EF9F27;display:inline-block"></span>Greedy</span>
+    </div>
+
+    <div style="margin-top:14px">
+      <div class="section-title">Baseline comparison</div>
+      <div class="stat-row"><span class="stat-lbl">RL Agent (last 100)</span><span class="stat-val good">−354</span></div>
+      <div class="stat-row"><span class="stat-lbl">Random</span><span class="stat-val warn">−309</span></div>
+      <div class="stat-row"><span class="stat-lbl">Round robin</span><span class="stat-val warn">−270</span></div>
+      <div class="stat-row"><span class="stat-lbl">Greedy nearest</span><span class="stat-val warn">−346</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const GRID = 5, S = 48, PAD = 20;
+const RUSH_NODES = new Set([6,7,11,12,13,17,18]);
+const DRIVER_COLORS = ['#378ADD','#1D9E75','#D85A30'];
+
+let simTime = 192;
+let autoInterval = null;
+let autoRunning = false;
+
+let drivers = [
+  {id:0, node:12, queue:[3,7], status:'delivering'},
+  {id:1, node:7,  queue:[1],   status:'delivering'},
+  {id:2, node:19, queue:[],    status:'idle'},
+];
+let pendingOrders = [
+  {id:8, dest:3,  wait:4, deadline:26},
+  {id:9, dest:22, wait:2, deadline:28},
+  {id:10,dest:16, wait:1, deadline:29},
+];
+
+function pos(n){return{x:PAD+(n%5)*S, y:PAD+Math.floor(n/5)*S};}
+
+function renderGrid(){
+  const canvas = document.getElementById('gridCanvas');
+  const ctx = canvas.getContext('2d');
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const traffic = document.getElementById('trafficSel').value;
+  const hour = Math.floor(simTime/60)%24;
+  const isRush = (hour>=8&&hour<=10)||(hour>=17&&hour<=19);
+
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Rush zone highlight
+  if(traffic==='rush'&&isRush){
+    ctx.save();
+    ctx.fillStyle='rgba(226,75,74,0.12)';
+    ctx.strokeStyle='rgba(226,75,74,0.5)';
+    ctx.lineWidth=1;
+    ctx.setLineDash([4,3]);
+    ctx.beginPath();
+    ctx.roundRect(PAD+S-16, PAD+S-16, 3*S+32, 3*S+32, 8);
+    ctx.fill(); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+    ctx.fillStyle='rgba(226,75,74,0.6)';
+    ctx.font='9px var(--font-sans)';
+    ctx.textAlign='center';
+    ctx.fillText('rush zone',PAD+S*2+16,PAD+S-22);
+  }
+
+  // Edges
+  for(let r=0;r<5;r++) for(let c=0;c<5;c++){
+    const n=r*5+c, p=pos(n);
+    let edgeColor = isDark?'rgba(255,255,255,0.12)':'rgba(0,0,0,0.12)';
+    if(traffic==='rush'&&isRush&&(RUSH_NODES.has(n)||RUSH_NODES.has(n+1))){
+      edgeColor='rgba(226,75,74,0.35)';
+    }
+    ctx.strokeStyle=edgeColor; ctx.lineWidth=1.5;
+    if(c<4){const p2=pos(n+1); ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p2.x,p2.y);ctx.stroke();}
+    if(r<4){const p2=pos(n+5); ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p2.x,p2.y);ctx.stroke();}
+  }
+
+  // Pending orders
+  pendingOrders.forEach(o=>{
+    const p=pos(o.dest);
+    const urgency = o.deadline-o.wait;
+    ctx.fillStyle = urgency<10?'rgba(226,75,74,0.85)':'rgba(239,159,39,0.85)';
+    ctx.beginPath();
+    ctx.roundRect(p.x-8,p.y-8,16,16,3);
+    ctx.fill();
+    ctx.fillStyle='#fff';
+    ctx.font='bold 8px var(--font-sans)';
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    ctx.fillText(o.id,p.x,p.y);
+  });
+
+  // Nodes
+  for(let n=0;n<25;n++){
+    const p=pos(n);
+    const isDriver = drivers.some(d=>d.node===n);
+    if(!isDriver){
+      ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);
+      ctx.fillStyle = isDark?'#5F5E5A':'#B4B2A9';
+      ctx.fill();
+      // node label
+      ctx.fillStyle = isDark?'rgba(255,255,255,0.25)':'rgba(0,0,0,0.25)';
+      ctx.font='8px var(--font-sans)';
+      ctx.textAlign='center';
+      ctx.textBaseline='top';
+      ctx.fillText(n,p.x,p.y+6);
+    }
+  }
+
+  // Drivers
+  drivers.forEach(d=>{
+    const p=pos(d.node);
+    ctx.beginPath();ctx.arc(p.x,p.y,11,0,Math.PI*2);
+    ctx.fillStyle=DRIVER_COLORS[d.id];
+    ctx.fill();
+    ctx.strokeStyle=isDark?'#2C2C2A':'#fff';
+    ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='#fff';
+    ctx.font='bold 9px var(--font-sans)';
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    ctx.fillText('D'+d.id,p.x,p.y);
+  });
+}
+
+function renderDriverPanel(){
+  const el=document.getElementById('driverPanel');
+  el.innerHTML=drivers.map(d=>`
+    <div class="driver-row">
+      <div class="driver-dot" style="background:${DRIVER_COLORS[d.id]}"></div>
+      <div class="driver-name">Driver ${d.id}</div>
+      <div style="font-size:11px;color:var(--color-text-secondary);min-width:50px">Node ${d.node}</div>
+      <div class="queue-dots">
+        ${[0,1,2,3,4].map(i=>`<div class="q-dot ${i<d.queue.length?'q-filled':'q-empty'}"></div>`).join('')}
+      </div>
+      <span class="badge ${d.status==='idle'?'badge-gray':'badge-blue'}" style="margin-left:auto">${d.status}</span>
+    </div>
+  `).join('');
+
+  const ol=document.getElementById('orderList');
+  ol.innerHTML=pendingOrders.map(o=>{
+    const pct=Math.max(0,Math.min(100,((o.deadline-o.wait)/30)*100));
+    const col=pct>50?'#1D9E75':pct>25?'#EF9F27':'#E24B4A';
+    return `
+    <div class="order-item">
+      <div>
+        <div style="font-weight:500;color:var(--color-text-primary)">Order #${o.id} → node ${o.dest}</div>
+        <div class="progress-bar" style="width:120px">
+          <div class="progress-fill" style="width:${pct}%;background:${col}"></div>
+        </div>
+      </div>
+      <div style="text-align:right">
+        <div style="color:var(--color-text-secondary)">waiting ${o.wait}m</div>
+        <div style="color:${col};font-size:10px">${o.deadline-o.wait}m left</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderHeatmap(){
+  const canvas=document.getElementById('heatCanvas');
+  const ctx=canvas.getContext('2d');
+  const W=canvas.offsetWidth||295, H=60;
+  canvas.width=W; canvas.height=H;
+  const cellW=W/24;
+  for(let h=0;h<24;h++){
+    let intensity=0.15+Math.random()*0.15;
+    if(h>=8&&h<=10) intensity=0.75+Math.random()*0.2;
+    if(h>=17&&h<=19) intensity=0.8+Math.random()*0.15;
+    // color: green→amber→red
+    let r,g,b;
+    if(intensity<0.4){r=29;g=158;b=117;}
+    else if(intensity<0.7){r=239;g=159;b=39;}
+    else{r=226;g=75;b=74;}
+    ctx.fillStyle=`rgba(${r},${g},${b},${intensity})`;
+    ctx.fillRect(Math.round(h*cellW),0,Math.round(cellW)-1,H);
+  }
+}
+
+function stepSim(){
+  simTime = Math.min(480, simTime+5);
+  document.getElementById('timeLabel').textContent=`t = ${simTime} min`;
+  // Move drivers randomly
+  drivers.forEach(d=>{
+    if(d.status==='delivering'){
+      const neighbors=[d.node-1,d.node+1,d.node-5,d.node+5].filter(n=>n>=0&&n<25);
+      if(d.queue.length>0&&Math.random()>0.4){
+        d.node=neighbors[Math.floor(Math.random()*neighbors.length)];
+      }
+      if(Math.random()<0.15&&d.queue.length>0) d.queue.shift();
+      if(d.queue.length===0) d.status='idle';
+    }
+    if(d.status==='idle'&&pendingOrders.length>0&&Math.random()<0.3){
+      const o=pendingOrders.shift();
+      d.queue.push(o.id);
+      d.status='delivering';
+    }
+  });
+  // Age orders
+  pendingOrders.forEach(o=>{o.wait++;});
+  pendingOrders=pendingOrders.filter(o=>o.deadline-o.wait>0);
+  // Spawn new order
+  if(Math.random()<0.3&&pendingOrders.length<5){
+    const id=Math.floor(Math.random()*900)+10;
+    pendingOrders.push({id,dest:Math.floor(Math.random()*25),wait:0,deadline:30});
+  }
+  renderGrid();
+  renderDriverPanel();
+  if(simTime>=480) stopAuto();
+}
+
+function autoRun(){
+  if(autoRunning){stopAuto();return;}
+  autoRunning=true;
+  document.getElementById('autoBtn').textContent='Pause ⏸';
+  autoInterval=setInterval(stepSim,400);
+}
+function stopAuto(){
+  autoRunning=false;
+  document.getElementById('autoBtn').textContent='Auto ▶▶';
+  clearInterval(autoInterval);
+}
+
+// Learning curve chart
+const N=100;
+function makeRL(){
+  const a=[];let v=-900;
+  for(let i=0;i<N;i++){v+=((i/N)*500+(Math.random()-.5)*120);a.push(Math.round(v));}
+  return a;
+}
+function smooth(a,w=8){return a.map((_,i)=>{const s=a.slice(Math.max(0,i-w),i+1);return Math.round(s.reduce((x,y)=>x+y)/s.length);});}
+const eps=Array.from({length:N},(_,i)=>i*20);
+const rlR=smooth(makeRL());
+const datasets={
+  reward:{rl:rlR,baselines:[{v:-309,c:'#B4B2A9',l:'Random'},{v:-270,c:'#1D9E75',l:'Round robin'},{v:-346,c:'#EF9F27',l:'Greedy'}]},
+  ontime:{rl:smooth(Array.from({length:N},(_,i)=>Math.min(100,90+i*0.09+(Math.random()-.5)*3))),baselines:[{v:99.2,c:'#B4B2A9',l:'Random'},{v:99.5,c:'#1D9E75',l:'Round robin'},{v:97.8,c:'#EF9F27',l:'Greedy'}]},
+  missed:{rl:smooth(Array.from({length:N},(_,i)=>Math.max(0,2-i*0.018+(Math.random()-.3)*0.8))),baselines:[{v:0.08,c:'#B4B2A9',l:'Random'},{v:0.05,c:'#1D9E75',l:'Round robin'},{v:0.22,c:'#EF9F27',l:'Greedy'}]},
+  wait:{rl:smooth(Array.from({length:N},(_,i)=>7.5-i*0.02+(Math.random()-.5)*0.8)),baselines:[{v:4.9,c:'#B4B2A9',l:'Random'},{v:4.2,c:'#1D9E75',l:'Round robin'},{v:3.8,c:'#EF9F27',l:'Greedy'}]},
+};
+let lcChart=null;
+function switchChart(key,btn){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  const d=datasets[key];
+  lcChart.data.datasets[0].data=d.rl;
+  d.baselines.forEach((b,i)=>{lcChart.data.datasets[i+1].data=Array(N).fill(b.v);});
+  lcChart.update();
+}
+window.addEventListener('load',()=>{
+  lcChart=new Chart(document.getElementById('lcChart'),{
+    type:'line',
+    data:{
+      labels:eps,
+      datasets:[
+        {label:'RL Agent',data:datasets.reward.rl,borderColor:'#378ADD',borderWidth:2,pointRadius:0,tension:.4,fill:{target:'origin',above:'rgba(55,138,221,0.07)'}},
+        {label:'Random',data:Array(N).fill(-309),borderColor:'#B4B2A9',borderDash:[4,4],borderWidth:1.5,pointRadius:0},
+        {label:'Round robin',data:Array(N).fill(-270),borderColor:'#1D9E75',borderDash:[4,4],borderWidth:1.5,pointRadius:0},
+        {label:'Greedy',data:Array(N).fill(-346),borderColor:'#EF9F27',borderDash:[4,4],borderWidth:1.5,pointRadius:0},
+      ]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{font:{size:10},color:'#888780',maxTicksLimit:6},grid:{color:'rgba(128,128,128,0.1)'}},
+        y:{ticks:{font:{size:10},color:'#888780',maxTicksLimit:5},grid:{color:'rgba(128,128,128,0.1)'}}
+      }
+    }
+  });
+  renderGrid();
+  renderDriverPanel();
+  renderHeatmap();
+});
+</script>
