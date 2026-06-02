@@ -1,10 +1,10 @@
 # Intelligent Traffic-Aware Delivery Optimization
-**CS4100 · Artificial Intelligence · Khoury College, Northeastern University**
+**CS5100 · Foundation of Artificial Intelligence · Khoury College, Northeastern University**
 
 ---
 
 ## Team Members
-- Drashti Bhavsar
+- Drashti Bhavsar: bhavsar.dr@northeastern.edu
 - Venkata Sai Udayini Vedantham
 - Elyssa Querubin
 
