@@ -80,7 +80,10 @@ StepReward = −(load_imbalance × 2.0) − (pending_orders × 1.5)
 ```
 
 ### View the interactive dashboard
-Open `delivery_simulation_dashboard.html` directly in any browser — no server needed. 
+
+```
+Open `delivery_simulation_dashboard.html` directly in any browser — no server needed.
+```
 ---
 
 ## Repository Structure
