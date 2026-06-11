@@ -3,7 +3,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
-from agents.assignment import assign_order_to_driver, locally_optimize_queue
+from assignment import assign_order_to_driver, locally_optimize_queue
 
 @dataclass
 class Order:
