@@ -3,6 +3,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
+from agents.assignment import assign_order_to_driver, locally_optimize_queue
 
 @dataclass
 class Order:
@@ -186,20 +187,15 @@ class DeliveryEnvironment:
         return self.get_state(), reward, done
     
     def _generate_order(self):
-        order = Order(self.order_counter, random.randint(0, self.graph.num_nodes - 1), 
-                     self.current_time, self.current_time + 30)
+        order = Order(self.order_counter, random.randint(0, self.graph.num_nodes - 1),
+                    self.current_time, self.current_time + 30)
         self.orders[order.id] = order
         self.order_counter += 1
-        
-        # Auto-assign to nearest driver
-        def manhattan_distance(n1, n2):
-            r1, c1 = n1 // 5, n1 % 5
-            r2, c2 = n2 // 5, n2 % 5
-            return abs(r2-r1) + abs(c2-c1)
-        
-        best_driver = min(self.drivers, key=lambda d: manhattan_distance(d.current_node, order.destination) + len(d.order_queue)*10)
-        best_driver.add_order(order.id)
-        order.assigned_driver = best_driver.id
+
+        driver_id, pos = assign_order_to_driver(order, self)
+        order.assigned_driver = driver_id
+        self.drivers[driver_id].order_queue.insert(pos, order.id)
+        locally_optimize_queue(self.drivers[driver_id], self)
     
     def _complete_delivery(self, driver):
         order_id = driver.complete_delivery()
