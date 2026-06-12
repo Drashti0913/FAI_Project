@@ -1,577 +1,661 @@
 """
-server.py — Flask backend for the delivery simulation demo.
+server_ql.py — 1 Driver Q-learning demo.
 
-Connects delivery_env.py + assignment.py to the live web UI.
+Put in SAME folder as: delivery_env.py  rl_agent.py  assignment.py
 
 Run:
     pip install flask
-    python3 server.py
+    python3 server_ql.py
 
-Then open:  http://localhost:5000
+Open: http://localhost:8080
 """
 
-import json
-import random
+import random, os
+from collections import deque
 from flask import Flask, jsonify, request, render_template_string
-
 from delivery_env import DeliveryEnvironment, Order
 
-try:
-    from assignment import assign_order_to_driver, locally_optimize_queue
-    USE_ASSIGNMENT = True
-    print("[OK] Assignment heuristic loaded")
-except ImportError:
-    USE_ASSIGNMENT = False
-    print("[WARN] assignment.py not found — using simple nearest-driver assignment")
+# ── Q-learning agent (1 driver version) ──────────────────────────────
+import numpy as np, pickle
 
-app = Flask(__name__)
+class SingleDriverQLAgent:
+    """
+    Q-learning agent for exactly 1 driver.
+    State: (current_node, next_dest, queue_len, hour)
+    Action: index into neighbors list (0-3) or 4=stay
+    """
+    def __init__(self, alpha=0.1, gamma=0.95,
+                 epsilon_start=1.0, epsilon_end=0.1, epsilon_decay=0.9995):
+        self.Q            = {}
+        self.alpha        = alpha
+        self.gamma        = gamma
+        self.epsilon      = epsilon_start
+        self.epsilon_end  = epsilon_end
+        self.epsilon_decay= epsilon_decay
 
-# ── Global simulation state ──────────────────────────────────────────
-env   = None
-stats = {"completed": 0, "ontime": 0, "total_wait": 0}
+    def discretize_state(self, env):
+        d    = env.drivers[0]
+        hour = (env.current_time // 60) % 24
+        if d.order_queue:
+            dest  = env.orders[d.order_queue[0]].destination
+            qlen  = min(len(d.order_queue), 5)
+        else:
+            dest, qlen = -1, 0
+        return (d.current_node, dest, qlen, hour)
+
+    def select_action(self, state, env, epsilon=None):
+        if epsilon is None:
+            epsilon = self.epsilon
+        neighbors = env.graph.get_neighbors(env.drivers[0].current_node)
+        n_actions = len(neighbors) + 1   # neighbors + stay
+        if random.random() < epsilon or state not in self.Q:
+            return random.randint(0, n_actions - 1)
+        q = self.Q[state]
+        # only consider valid actions for this state
+        valid_q = q[:n_actions]
+        return int(np.argmax(valid_q))
+
+    def update(self, state, action, reward, next_state, env, done):
+        n_act = len(env.graph.get_neighbors(env.drivers[0].current_node)) + 1
+        if state not in self.Q:
+            self.Q[state] = np.zeros(5)   # max 4 neighbors + stay
+        if next_state not in self.Q:
+            self.Q[next_state] = np.zeros(5)
+        old_q  = self.Q[state][action]
+        target = reward if done else reward + self.gamma * np.max(self.Q[next_state][:n_act])
+        self.Q[state][action] = old_q + self.alpha * (target - old_q)
+
+    def decay_epsilon(self):
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+
+    def save(self, path):
+        with open(path, 'wb') as f:
+            pickle.dump({'Q': self.Q, 'epsilon': self.epsilon}, f)
+
+    def load(self, path):
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+            self.Q       = data['Q']
+            self.epsilon = data.get('epsilon', self.epsilon_end)
+
+# ── Setup ─────────────────────────────────────────────────────────────
+agent      = SingleDriverQLAgent()
+AGENT_MODE = "random"
+
+if os.path.exists("Q_table_1driver.pkl"):
+    agent.load("Q_table_1driver.pkl")
+    agent.epsilon = 0.0
+    AGENT_MODE    = "qlearning"
+    print(f"[OK] Q-table loaded — {len(agent.Q)} states")
+else:
+    print("[INFO] No Q_table_1driver.pkl found — will train live or use random")
+
+app         = Flask(__name__)
+env         = None
+stats       = {}
+events      = deque(maxlen=60)
+reward_hist = []
+ep_rewards  = []   # rewards within current episode
 
 def make_env():
-    global env, stats
-    env   = DeliveryEnvironment(num_drivers=3, grid_size=5,
-                                 traffic_pattern='rush_hour',
-                                 order_arrival_rate=0.3)
+    global env, stats, reward_hist, ep_rewards
+    env = DeliveryEnvironment(
+        num_drivers=1, grid_size=5,
+        traffic_pattern="rush_hour",
+        order_arrival_rate=0.25,
+        use_progress_shaping=False,
+    )
     env.reset()
-    stats = {"completed": 0, "ontime": 0, "total_wait": 0}
+    stats       = {"completed":0,"ontime":0,"total_wait":0,"missed":0,"ep":0}
+    reward_hist = []
+    ep_rewards  = []
+    events.clear()
+    events.appendleft("Simulation ready. 1 driver, Q-learning.")
 
 make_env()
 
-# ── Helper: get edges with their current congestion status ───────────
-def get_edge_data():
-    edges = []
-    hour  = (env.current_time // 60) % 24
-    seen  = set()
+# ── Helpers ───────────────────────────────────────────────────────────
+def get_edges():
+    hour = (env.current_time // 60) % 24
+    seen, out = set(), []
     for (n1, n2) in env.graph.edges.keys():
         key = (min(n1,n2), max(n1,n2))
-        if key in seen:
-            continue
+        if key in seen: continue
         seen.add(key)
-        mult = env.graph.traffic_multipliers.get((n1,n2), {}).get(hour, 1.0)
-        if mult == 1.0:
-            mult = env.graph.traffic_multipliers.get((n2,n1), {}).get(hour, 1.0)
-        base = env.graph.edges.get((n1,n2), env.graph.edges.get((n2,n1), 10))
-        learned_key = (n1, n2)
-        r_key = (n2, n1)
-        learned_data = env.learned_traffic.get(learned_key) or env.learned_traffic.get(r_key)
-        learned_time = None
-        if learned_data and hour in learned_data and learned_data[hour]:
-            learned_time = round(sum(learned_data[hour]) / len(learned_data[hour]), 1)
-        edges.append({
-            "from":         n1,
-            "to":           n2,
-            "base_time":    base,
-            "multiplier":   mult,
-            "congested":    mult > 1.0,
-            "learned_time": learned_time,
-        })
-    return edges
+        m = env.graph.traffic_multipliers.get((n1,n2),{}).get(hour,1.0)
+        if m == 1.0:
+            m = env.graph.traffic_multipliers.get((n2,n1),{}).get(hour,1.0)
+        base = env.graph.edges.get((n1,n2), 10)
+        lrn  = env.learned_traffic.get((n1,n2)) or env.learned_traffic.get((n2,n1))
+        lt   = None
+        if lrn and hour in lrn and lrn[hour]:
+            lt = round(sum(lrn[hour])/len(lrn[hour]), 1)
+        out.append({"from":n1,"to":n2,"base":base,
+                    "mult":m,"congested":m>1.0,"learned":lt})
+    return out
 
-# ── Helper: build full state snapshot ────────────────────────────────
-def get_state():
-    hour = (env.current_time // 60) % 24
-    rush = hour in [8, 9, 10, 17, 18, 19]
+def snapshot():
+    hour  = (env.current_time // 60) % 24
+    rush  = hour in {8,9,10,17,18,19}
+    d     = env.drivers[0]
+    dest  = None
+    if d.order_queue and d.order_queue[0] in env.orders:
+        dest = env.orders[d.order_queue[0]].destination
 
-    drivers = []
-    for d in env.drivers:
-        dest = None
-        if d.order_queue:
-            o = env.orders.get(d.order_queue[0])
-            dest = o.destination if o else None
-        drivers.append({
-            "id":         d.id,
-            "node":       d.current_node,
-            "queue_len":  len(d.order_queue),
-            "queue":      list(d.order_queue),
-            "status":     d.status,
-            "dest":       dest,
-            "route":      list(d.route),
-        })
+    # Q-table info
+    state     = agent.discretize_state(env)
+    q_arr     = agent.Q.get(state, None)
+    q_known   = q_arr is not None
+    neighbors = env.graph.get_neighbors(d.current_node)
+    q_actions = []
+    if q_arr is not None:
+        for i, nb in enumerate(neighbors):
+            q_actions.append({"node": nb, "q": round(float(q_arr[i]), 2)})
+        # stay action
+        stay_idx = len(neighbors)
+        if stay_idx < len(q_arr):
+            q_actions.append({"node": "stay", "q": round(float(q_arr[stay_idx]), 2)})
 
     orders = []
     for o in env.orders.values():
         if not o.delivered:
-            orders.append({
-                "id":           o.id,
-                "dest":         o.destination,
-                "arrival":      o.arrival_time,
-                "deadline":     o.deadline,
-                "time_left":    o.deadline - env.current_time,
-                "assigned_to":  o.assigned_driver,
-                "urgent":       (o.deadline - env.current_time) < 10,
-            })
+            tl = o.deadline - env.current_time
+            if tl > 0:
+              orders.append({"id":o.id,"dest":o.destination,
+                   "time_left":tl,"urgent":tl<10,"driver":o.assigned_driver})
 
-    on_time_pct = 0
-    avg_wait    = 0
-    if stats["completed"] > 0:
-        on_time_pct = round(stats["ontime"] / stats["completed"] * 100, 1)
-        avg_wait    = round(stats["total_wait"] / stats["completed"], 1)
+    otp = round(stats["ontime"]/stats["completed"]*100,1) if stats["completed"]>0 else 0
+    aw  = round(stats["total_wait"]/stats["completed"],1) if stats["completed"]>0 else 0
 
     return {
-        "time":        env.current_time,
-        "hour":        hour,
-        "rush_hour":   rush,
-        "hour_str":    f"{hour}:{env.current_time % 60:02d}",
-        "drivers":     drivers,
-        "orders":      orders,
-        "pending":     len(env.pending_orders),
-        "completed":   stats["completed"],
-        "on_time_pct": on_time_pct,
-        "avg_wait":    avg_wait,
-        "edges":       get_edge_data(),
+        "time":env.current_time, "hour":hour,
+        "hour_str":f"{hour}:{env.current_time%60:02d}",
+        "rush":rush,
+        "driver":{"node":d.current_node,"dest":dest,
+                  "queue":list(d.order_queue),"queue_len":len(d.order_queue),
+                  "status":d.status},
+        "orders":orders, "edges":get_edges(),
+        "completed":stats["completed"], "missed":stats["missed"],
+        "on_time_pct":otp, "avg_wait":aw,
+        "agent_mode":AGENT_MODE,
+        "q_known":q_known, "q_states":len(agent.Q),
+        "q_actions":q_actions, "epsilon":round(agent.epsilon,4),
+        "reward_history":list(reward_hist[-80:]),
+        "events":list(events)[:20],
     }
 
-# ── Step the simulation one tick ─────────────────────────────────────
-def do_step():
-    """
-    Advances env one timestep using your real backend code.
-    Generates orders via env internals, moves drivers, records deliveries.
-    """
-    prev_nodes = [d.current_node for d in env.drivers]
-    events     = []
+def do_step(n=1, train=False):
+    global ep_rewards
+    for _ in range(n):
+        d         = env.drivers[0]
+        state     = agent.discretize_state(env)
+        action    = agent.select_action(state, env)
+        neighbors = env.graph.get_neighbors(d.current_node)
 
-    # Generate new order
-    if random.random() < env.order_arrival_rate:
-        order = Order(
-            id           = env.order_counter,
-            destination  = random.randint(0, env.graph.num_nodes - 1),
-            arrival_time = env.current_time,
-            deadline     = env.current_time + 30,
-        )
-        env.orders[order.id] = order
-        env.order_counter += 1
-
-        # Use assignment heuristic if available, otherwise nearest driver
-        if USE_ASSIGNMENT:
-            driver_id, pos = assign_order_to_driver(order, env)
-            order.assigned_driver = driver_id
-            env.drivers[driver_id].order_queue.insert(pos, order.id)
-            locally_optimize_queue(env.drivers[driver_id], env)
-            events.append(f"Order {order.id} → Driver {driver_id} (heuristic, pos {pos})")
+        # convert action index to neighbor node
+        if action < len(neighbors):
+            move = [action]
         else:
-            def mdist(a, b): return abs(a//5-b//5)+abs(a%5-b%5)
-            best = min(env.drivers,
-                       key=lambda d: mdist(d.current_node, order.destination) + len(d.order_queue)*10)
-            best.add_order(order.id)
-            order.assigned_driver = best.id
-            events.append(f"Order {order.id} → Driver {best.id} (nearest)")
+            move = [len(neighbors)]   # stay (out-of-range = stay in env)
 
-        # Recompute route for assigned driver
-        d = env.drivers[order.assigned_driver]
-        _recompute_route(d)
+        prev      = len(env.completed_orders)
+        _, reward, done = env.step(move)
+        next_state = agent.discretize_state(env)
+        ep_rewards.append(reward)
 
-    # Move drivers
-    for driver in env.drivers:
-        if driver.route and driver.status == 'delivering':
-            next_node = driver.route.pop(0)
-            hour      = (env.current_time // 60) % 24
-            edge      = (driver.current_node, next_node)
-            actual    = env.graph.get_edge_cost(driver.current_node, next_node, hour)
-            env.learned_traffic[edge][hour].append(actual)
-            driver.current_node = next_node
+        if train:
+            agent.update(state, action, reward, next_state, env, done)
 
-            # Check delivery
-            if driver.order_queue:
-                first = env.orders.get(driver.order_queue[0])
-                if first and driver.current_node == first.destination:
-                    oid = driver.order_queue.pop(0)
-                    o   = env.orders[oid]
-                    o.delivered     = True
-                    o.delivery_time = env.current_time
-                    wait = env.current_time - o.arrival_time
-                    late = env.current_time > o.deadline
-                    stats["completed"]  += 1
-                    stats["total_wait"] += wait
-                    if not late:
-                        stats["ontime"] += 1
-                    env.completed_orders.append(oid)
-                    events.append(
-                        f"Driver {driver.id} delivered order {oid} "
-                        f"(wait {wait}min, {'LATE' if late else 'on-time'})"
-                    )
-                    _recompute_route(driver)
+        for oid in env.completed_orders[prev:]:
+            o    = env.orders[oid]
+            wait = o.delivery_time - o.arrival_time
+            late = o.delivery_time > o.deadline
+            stats["completed"]  += 1
+            stats["total_wait"] += wait
+            if not late: stats["ontime"] += 1
+            else:        stats["missed"] += 1
+            tag = "LATE ✗" if late else "on-time ✓"
+            events.appendleft(
+                f"t={env.current_time}: delivered #{oid} "
+                f"(wait {wait}min, {tag})")
 
-    env.current_time += 1
-    return events
-
-def _recompute_route(driver):
-    """Simple BFS route to first queued order's destination."""
-    if not driver.order_queue:
-        driver.route  = []
-        driver.status = 'idle'
-        return
-    dest = env.orders[driver.order_queue[0]].destination
-    path = _bfs(driver.current_node, dest)
-    driver.route  = path[1:]
-    driver.status = 'delivering' if driver.route else 'idle'
-
-def _bfs(start, goal):
-    if start == goal:
-        return [start]
-    from collections import deque
-    vis = {start: None}
-    q   = deque([start])
-    while q:
-        n = q.popleft()
-        for nb in env.graph.get_neighbors(n):
-            if nb not in vis:
-                vis[nb] = n
-                if nb == goal:
-                    path, c = [], goal
-                    while c is not None:
-                        path.append(c); c = vis[c]
-                    return path[::-1]
-                q.append(nb)
-    return [start]
+        if done:
+            stats["ep"] += 1
+            ep_total = sum(ep_rewards)
+            reward_hist.append(round(ep_total, 1))
+            ep_rewards = []
+            if train:
+                agent.decay_epsilon()
+                if stats["ep"] % 100 == 0:
+                    agent.save("Q_table_1driver.pkl")
+                    events.appendleft(f"Q-table saved ({len(agent.Q)} states)")
+            events.appendleft(
+                f"--- Episode {stats['ep']} done | "
+                f"completed {len(env.completed_orders)} | "
+                f"reward {ep_total:.0f} ---")
+            env.reset()
+            break
 
 # ── Routes ────────────────────────────────────────────────────────────
+@app.route("/")
+def index(): return render_template_string(HTML)
 
-@app.route('/')
-def index():
-    return render_template_string(HTML)
+@app.route("/api/state")
+def api_state(): return jsonify(snapshot())
 
-@app.route('/api/state')
-def api_state():
-    return jsonify(get_state())
-
-@app.route('/api/step', methods=['POST'])
+@app.route("/api/step", methods=["POST"])
 def api_step():
-    n     = int(request.json.get('n', 1))
-    events = []
-    for _ in range(n):
-        events.extend(do_step())
-        if env.current_time >= 480 or len(env.completed_orders) >= 50:
-            break
-    return jsonify({**get_state(), "events": events[-10:]})
+    n     = int(request.json.get("n", 1))
+    train = bool(request.json.get("train", False))
+    do_step(n, train=train)
+    return jsonify(snapshot())
 
-@app.route('/api/reset', methods=['POST'])
+@app.route("/api/reset", methods=["POST"])
 def api_reset():
-    make_env()
-    return jsonify(get_state())
+    make_env(); return jsonify(snapshot())
 
-@app.route('/api/set_time', methods=['POST'])
-def api_set_time():
-    """Jump to a specific hour for rush-hour demo."""
-    hour = int(request.json.get('hour', 9))
-    env.current_time = hour * 60
-    return jsonify(get_state())
+@app.route("/api/jump", methods=["POST"])
+def api_jump():
+    h = int(request.json.get("hour", 9))
+    env.current_time = h * 60
+    events.appendleft(f"Jumped to {h}:00")
+    return jsonify(snapshot())
 
 # ── HTML UI ───────────────────────────────────────────────────────────
-
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dynamic Delivery Optimization — Live Demo</title>
+<title>Q-Learning Delivery — 1 Driver</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;color:#1a1a1a;font-size:14px}
-header{background:#fff;border-bottom:1px solid #e0e0e0;padding:14px 24px;display:flex;align-items:center;gap:16px}
-header h1{font-size:16px;font-weight:600;color:#1a1a1a}
-header p{font-size:13px;color:#666;margin-top:1px}
-.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:500}
-.badge-green{background:#e8f5e9;color:#2e7d32}
-.badge-red{background:#ffebee;color:#c62828}
-.badge-blue{background:#e3f2fd;color:#1565c0}
-main{display:grid;grid-template-columns:1fr 280px;gap:16px;padding:16px 24px;max-width:1100px;margin:0 auto}
-.grid-card{background:#fff;border-radius:12px;border:1px solid #e0e0e0;padding:16px}
-.card{background:#fff;border-radius:12px;border:1px solid #e0e0e0;padding:14px;margin-bottom:12px}
-.card h3{font-size:13px;font-weight:600;color:#555;margin-bottom:10px;text-transform:uppercase;letter-spacing:.4px}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
-.stat{background:#fafafa;border:1px solid #eee;border-radius:8px;padding:10px 12px;text-align:center}
-.stat-val{font-size:22px;font-weight:600;color:#1a1a1a}
-.stat-lbl{font-size:11px;color:#888;margin-top:2px}
-canvas{display:block;width:100%;border-radius:8px}
-.controls{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
-button{padding:7px 16px;border-radius:8px;border:1px solid #ddd;background:#fff;cursor:pointer;font-size:13px;font-weight:500}
-button:hover{background:#f5f5f5}
-button.primary{background:#1976d2;border-color:#1565c0;color:#fff}
-button.primary:hover{background:#1565c0}
-button.danger{background:#e53935;border-color:#c62828;color:#fff}
-input[type=range]{flex:1;accent-color:#1976d2}
-label{font-size:12px;color:#666;white-space:nowrap}
-.log{height:130px;overflow-y:auto;font-size:12px;color:#555;line-height:1.7}
-.log div{border-bottom:1px solid #f0f0f0;padding:1px 0}
-.log .late{color:#c62828;font-weight:500}
-.log .delivered{color:#2e7d32}
-.driver-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;font-size:12px}
-.driver-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-.order-row{display:flex;align-items:center;justify-content:space-between;padding:3px 0;font-size:12px;border-bottom:1px solid #f5f5f5}
-.time-btns{display:flex;gap:6px;flex-wrap:wrap}
-.time-btns button{padding:4px 10px;font-size:11px}
-.rush-info{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:8px 12px;font-size:12px;color:#f57f17;margin-bottom:10px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:13px}
+header{background:#1a1a2e;color:#fff;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+header h1{font-size:15px;font-weight:600}
+header p{font-size:11px;color:#aab;margin-top:2px}
+.hb{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.b-green{background:#27ae60;color:#fff}.b-red{background:#e74c3c;color:#fff}
+.b-blue{background:#2980b9;color:#fff}.b-amber{background:#f39c12;color:#111}
+.b-purple{background:#8e44ad;color:#fff}.b-gray{background:#7f8c8d;color:#fff}
+main{display:grid;grid-template-columns:1fr 270px;gap:10px;padding:10px;max-width:1080px;margin:0 auto}
+.card{background:#fff;border-radius:10px;border:1px solid #e0e0e0;padding:12px;margin-bottom:10px}
+.card h3{font-size:10px;font-weight:700;color:#999;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+.stat{background:#fff;border:1px solid #eee;border-radius:8px;padding:8px 4px;text-align:center}
+.sv{font-size:22px;font-weight:700;color:#1a1a2e}.sl{font-size:10px;color:#aaa;margin-top:1px}
+canvas{display:block;width:100%}
+.ctrl{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+.ctrl label{font-size:11px;color:#888;white-space:nowrap}
+input[type=range]{flex:1;min-width:50px;accent-color:#2980b9}
+button{padding:6px 12px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer;font-size:12px;font-weight:500}
+button:hover{background:#f0f2f5}
+.btn-play{background:#2980b9;border-color:#2471a3;color:#fff}
+.btn-stop{background:#e74c3c;border-color:#c0392b;color:#fff}
+.btn-reset{background:#27ae60;border-color:#229954;color:#fff}
+.btn-train{background:#8e44ad;border-color:#7d3c98;color:#fff}
+.jb{display:flex;gap:6px;flex-wrap:wrap}
+.jb button{padding:4px 8px;font-size:11px}
+.rush-btn{background:#fff8e1!important;border-color:#f39c12!important;color:#e67e22!important;font-weight:600!important}
+.o-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #f5f5f5;font-size:11px}
+.o-urgent{color:#e74c3c;font-weight:600}.o-ok{color:#27ae60}
+.q-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f5f5f5;font-size:12px}
+.q-bar-bg{flex:1;background:#f0f2f5;border-radius:4px;height:10px;overflow:hidden}
+.q-bar{height:10px;border-radius:4px;transition:width .3s}
+.log{height:110px;overflow-y:auto;font-size:11px;color:#555;line-height:1.6}
+.log div{border-bottom:1px solid #f5f5f5;padding:1px 0}
+.ev-late{color:#e74c3c}.ev-ok{color:#27ae60}.ev-ep{color:#8e44ad;font-weight:500}
+.d-card{background:#e8f4fd;border:1.5px solid #2980b9;border-radius:10px;padding:10px 12px;margin-bottom:10px}
+.d-card h3{color:#1a5276;margin-bottom:6px;font-size:11px;font-weight:700;text-transform:uppercase}
+.d-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #aed6f1;font-size:12px}
+.chart-wrap{height:75px}
+.train-row{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
+.train-info{font-size:11px;color:#888}
 </style>
 </head>
 <body>
-
 <header>
   <div>
-    <h1>Dynamic Delivery Optimization — Live Demo</h1>
-    <p>CS 4100 · Q-learning dispatch + simulation-based assignment heuristic + A* routing</p>
+    <h1>Q-Learning Delivery Optimization — 1 Driver</h1>
+    <p>CS 4100 · Tabular Q-learning navigation + simulation-based assignment heuristic (Person 2)</p>
   </div>
-  <span id="rush-badge" class="badge badge-green">Off-peak</span>
-  <span id="time-badge" class="badge badge-blue">t = 0</span>
+  <div class="hb">
+    <span id="agent-badge" class="badge b-blue">Agent: Q-learning</span>
+    <span id="rush-badge"  class="badge b-green">Off-peak</span>
+    <span id="time-badge"  class="badge b-amber">t=0</span>
+    <span id="state-badge" class="badge b-purple">States: 0</span>
+    <span id="eps-badge"   class="badge b-gray">ε=1.0</span>
+  </div>
 </header>
 
 <main>
-  <div>
-    <div class="stats">
-      <div class="stat"><div class="stat-val" id="s-completed">0</div><div class="stat-lbl">Completed</div></div>
-      <div class="stat"><div class="stat-val" id="s-ontime">—</div><div class="stat-lbl">On-time %</div></div>
-      <div class="stat"><div class="stat-val" id="s-wait">—</div><div class="stat-lbl">Avg wait (min)</div></div>
-      <div class="stat"><div class="stat-val" id="s-pending">0</div><div class="stat-lbl">Pending</div></div>
-    </div>
+<div>
+  <div class="stats">
+    <div class="stat"><div class="sv" id="s-comp">0</div><div class="sl">Completed</div></div>
+    <div class="stat"><div class="sv" id="s-ontime">—</div><div class="sl">On-time %</div></div>
+    <div class="stat"><div class="sv" id="s-wait">—</div><div class="sl">Avg wait (min)</div></div>
+    <div class="stat"><div class="sv" id="s-miss">0</div><div class="sl">Missed</div></div>
+  </div>
 
-    <div class="grid-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <span style="font-size:13px;font-weight:600;color:#555">5×5 City Grid</span>
-        <div style="display:flex;gap:10px;font-size:12px;color:#888">
-          <span>● Driver &nbsp; ■ Order &nbsp; <span style="color:#ef9f27">■</span> Urgent &nbsp; <span style="color:#ef5350">──</span> Rush edge</span>
-        </div>
-      </div>
-      <canvas id="grid" width="520" height="520"></canvas>
-      <div class="controls">
-        <button class="primary" id="btn-play" onclick="togglePlay()">▶ Play</button>
-        <button onclick="doReset()">↺ Reset</button>
-        <label>Speed</label>
-        <input type="range" id="speed" min="1" max="10" value="5" step="1">
-        <label>Order rate</label>
-        <input type="range" id="rate" min="1" max="9" value="3" step="1">
-      </div>
+  <div class="card">
+    <h3>5×5 City Grid
+      <span style="font-weight:400;color:#bbb;text-transform:none">
+        · Red = rush congestion · Orange square = order · Blue circle = driver
+      </span>
+    </h3>
+    <canvas id="grid" width="520" height="520"></canvas>
+    <div class="ctrl">
+      <button class="btn-play" id="btn" onclick="togglePlay(false)">▶ Play</button>
+      <button class="btn-train" id="btn-train" onclick="togglePlay(true)">▶ Train + Play</button>
+      <button class="btn-reset" onclick="doReset()">↺ Reset</button>
+      <label>Speed</label>
+      <input type="range" id="spd" min="1" max="15" value="5">
+      <span id="spd-lbl" style="font-size:11px;color:#888;min-width:24px">5×</span>
+    </div>
+    <div class="train-info" style="margin-top:6px">
+      <b>Play</b> = use Q-table only &nbsp;|&nbsp;
+      <b>Train + Play</b> = learn while running (Q-table grows, saves every 100 episodes)
     </div>
   </div>
 
-  <div>
-    <div class="card">
-      <h3>Jump to hour</h3>
-      <div id="rush-info" class="rush-info" style="display:none">⚠ Rush hour active — center edges 2× slower</div>
-      <div class="time-btns">
-        <button onclick="jumpTo(0)">12am</button>
-        <button onclick="jumpTo(8)" style="background:#fff8e1">8am rush</button>
-        <button onclick="jumpTo(12)">12pm</button>
-        <button onclick="jumpTo(17)" style="background:#fff8e1">5pm rush</button>
-        <button onclick="jumpTo(20)">8pm</button>
-      </div>
-    </div>
+  <div class="card">
+    <h3>Q-values for current state
+      <span id="q-lbl" style="font-weight:400;text-transform:none;color:#bbb"></span>
+    </h3>
+    <div id="q-viz"></div>
+  </div>
 
-    <div class="card">
-      <h3>Drivers</h3>
-      <div id="driver-list"></div>
-    </div>
+  <div class="card">
+    <h3>Episode reward history <span style="font-weight:400;color:#bbb;text-transform:none">(higher = better)</span></h3>
+    <div class="chart-wrap"><canvas id="rchart" height="75"></canvas></div>
+  </div>
+</div>
 
-    <div class="card">
-      <h3>Active orders</h3>
-      <div id="order-list" style="max-height:140px;overflow-y:auto"></div>
-    </div>
-
-    <div class="card">
-      <h3>Traffic learning</h3>
-      <div id="traffic-info" style="font-size:12px;color:#555;line-height:1.8"></div>
-    </div>
-
-    <div class="card">
-      <h3>Event log</h3>
-      <div class="log" id="log"></div>
+<div>
+  <div class="card">
+    <h3>Jump to hour</h3>
+    <div class="jb">
+      <button onclick="jump(0)">12am</button>
+      <button class="rush-btn" onclick="jump(8)">8am rush ⚡</button>
+      <button onclick="jump(12)">12pm</button>
+      <button class="rush-btn" onclick="jump(17)">5pm rush ⚡</button>
+      <button onclick="jump(22)">10pm</button>
     </div>
   </div>
+
+  <div class="d-card">
+    <h3>🚗 Driver D0</h3>
+    <div class="d-row"><span>Position</span><b id="d-node">—</b></div>
+    <div class="d-row"><span>Destination</span><b id="d-dest">—</b></div>
+    <div class="d-row"><span>Queue</span><b id="d-queue">0 orders</b></div>
+    <div class="d-row"><span>Status</span><b id="d-status">idle</b></div>
+    <div class="d-row" style="border:none"><span>State in Q-table?</span><span id="d-known">—</span></div>
+  </div>
+
+  <div class="card">
+    <h3>Active orders</h3>
+    <div id="order-list" style="max-height:130px;overflow-y:auto"></div>
+  </div>
+
+  <div class="card">
+    <h3>Traffic learning</h3>
+    <div id="traffic" style="font-size:12px;line-height:2;color:#555"></div>
+  </div>
+
+  <div class="card">
+    <h3>Event log</h3>
+    <div class="log" id="log"></div>
+  </div>
+</div>
 </main>
 
 <script>
-const COLS=['#1976d2','#2e7d32','#bf360c'];
-const GRID_SIZE=5;
-let playing=false,timer=null,state=null;
+const GS=5;
+let playing=false,training=false,timer=null,state=null;
 
-async function fetchState(){
-  const r=await fetch('/api/state');
-  state=await r.json();
-  render();
+async function load(){const r=await fetch('/api/state');state=await r.json();render();}
+async function step(n,train){
+  const r=await fetch('/api/step',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({n:n||1,train:train||false})});
+  state=await r.json();render();
 }
+async function doReset(){stop();const r=await fetch('/api/reset',{method:'POST'});state=await r.json();render();}
+async function jump(h){stop();const r=await fetch('/api/jump',{method:'POST',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify({hour:h})});
+  state=await r.json();render();}
 
-async function doStep(n=1){
-  const r=await fetch('/api/step',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({n})});
-  state=await r.json();
-  render();
-  if(state.events) state.events.forEach(e=>addLog(e));
+function togglePlay(train){
+  if(playing&&training===train){stop();return;}
+  if(playing){stop();}
+  start(train);
 }
-
-async function doReset(){
-  stopPlay();
-  const r=await fetch('/api/reset',{method:'POST'});
-  state=await r.json();
-  render();
-  addLog('Simulation reset.');
+function start(train){
+  playing=true;training=train;
+  const b=document.getElementById('btn');
+  const bt=document.getElementById('btn-train');
+  if(train){bt.textContent='⏸ Stop Training';bt.className='btn-stop';}
+  else{b.textContent='⏸ Pause';b.className='btn-stop';}
+  const spd=parseInt(document.getElementById('spd').value);
+  timer=setInterval(()=>step(1,train),Math.max(40,Math.round(700/spd)));
 }
-
-async function jumpTo(hour){
-  stopPlay();
-  const r=await fetch('/api/set_time',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hour})});
-  state=await r.json();
-  render();
-  addLog(`Jumped to ${hour}:00`);
-}
-
-function togglePlay(){
-  if(playing){stopPlay();}
-  else{startPlay();}
-}
-
-function startPlay(){
-  playing=true;
-  document.getElementById('btn-play').textContent='⏸ Pause';
-  document.getElementById('btn-play').className='primary danger';
-  const spd=parseInt(document.getElementById('speed').value);
-  const delay=Math.round(1000/spd);
-  timer=setInterval(()=>doStep(1),delay);
-}
-
-function stopPlay(){
-  playing=false;
-  document.getElementById('btn-play').textContent='▶ Play';
-  document.getElementById('btn-play').className='primary';
+function stop(){
+  playing=false;training=false;
+  document.getElementById('btn').textContent='▶ Play';
+  document.getElementById('btn').className='btn-play';
+  document.getElementById('btn-train').textContent='▶ Train + Play';
+  document.getElementById('btn-train').className='btn-train';
   clearInterval(timer);
 }
-
-document.getElementById('speed').oninput=function(){
-  if(playing){stopPlay();startPlay();}
+document.getElementById('spd').oninput=function(){
+  document.getElementById('spd-lbl').textContent=this.value+'×';
+  if(playing){const t=training;stop();start(t);}
 };
 
 function render(){
   if(!state)return;
-  document.getElementById('s-completed').textContent=state.completed;
+  document.getElementById('s-comp').textContent=state.completed;
   document.getElementById('s-ontime').textContent=state.on_time_pct>0?state.on_time_pct+'%':'—';
   document.getElementById('s-wait').textContent=state.avg_wait>0?state.avg_wait:'—';
-  document.getElementById('s-pending').textContent=state.pending;
-  document.getElementById('time-badge').textContent=`${state.hour_str}  (t=${state.time})`;
-
-  const isRush=state.rush_hour;
-  document.getElementById('rush-badge').textContent=isRush?'Rush hour!':'Off-peak';
-  document.getElementById('rush-badge').className='badge '+(isRush?'badge-red':'badge-green');
-  document.getElementById('rush-info').style.display=isRush?'block':'none';
-
-  renderDriverList();
-  renderOrderList();
-  renderTraffic();
-  drawGrid();
+  document.getElementById('s-miss').textContent=state.missed;
+  document.getElementById('time-badge').textContent=state.hour_str+' (t='+state.time+')';
+  document.getElementById('rush-badge').textContent=state.rush?'Rush hour ⚡':'Off-peak';
+  document.getElementById('rush-badge').className='badge '+(state.rush?'b-red':'b-green');
+  document.getElementById('state-badge').textContent='Q-states: '+state.q_states;
+  document.getElementById('eps-badge').textContent='ε='+state.epsilon;
+  const am=state.agent_mode;
+  document.getElementById('agent-badge').textContent=am==='qlearning'?'Agent: Q-learning':'Agent: Random';
+  document.getElementById('agent-badge').className='badge '+(am==='qlearning'?'b-blue':'b-red');
+  const d=state.driver;
+  document.getElementById('d-node').textContent='node '+d.node;
+  document.getElementById('d-dest').textContent=d.dest!==null?'node '+d.dest:'none';
+  document.getElementById('d-queue').textContent=d.queue_len+' order'+(d.queue_len!==1?'s':'');
+  document.getElementById('d-status').textContent=d.status;
+  document.getElementById('d-known').innerHTML=state.q_known?
+    '<span style="color:#27ae60;font-weight:600">✓ Yes — using Q-table</span>':
+    '<span style="color:#e74c3c">✗ No — random fallback</span>';
+  renderQViz();renderOrders();renderTraffic();renderLog();drawGrid();drawChart();
 }
 
-function renderDriverList(){
-  const el=document.getElementById('driver-list');
+function renderQViz(){
+  const el=document.getElementById('q-viz');
+  const lbl=document.getElementById('q-lbl');
+  const qa=state.q_actions||[];
+  if(!qa.length){
+    lbl.textContent='— state not seen yet';
+    el.innerHTML='<div style="color:#aaa;font-size:12px;padding:6px 0">No Q-values yet for this state. Agent explores randomly.</div>';
+    return;
+  }
+  lbl.textContent=`— ${qa.length} actions available`;
+  const nums=qa.map(a=>a.q);
+  const mn=Math.min(...nums),mx=Math.max(...nums),rng=mx-mn||1;
+  const best=qa.reduce((a,b)=>a.q>b.q?a:b);
   el.innerHTML='';
-  if(!state)return;
-  for(const d of state.drivers){
-    const div=document.createElement('div');
-    div.className='driver-row';
-    const status=d.status==='delivering'?`→ node ${d.dest}`:'idle';
-    div.innerHTML=`<div class="driver-dot" style="background:${COLS[d.id]}"></div>
-      <strong>D${d.id}</strong>
-      <span style="color:#888">node ${d.node}</span>
-      <span style="color:#555">${status}</span>
-      <span style="margin-left:auto;background:#f5f5f5;padding:1px 7px;border-radius:10px">${d.queue_len} orders</span>`;
+  for(const a of qa){
+    const pct=Math.max(4,Math.round((a.q-mn)/rng*100));
+    const isBest=a.node===best.node;
+    const col=isBest?'#2980b9':a.q>=0?'#27ae60':'#e74c3c';
+    const label=typeof a.node==='number'?`→ node ${a.node}`:a.node;
+    const div=document.createElement('div');div.className='q-row';
+    div.innerHTML=`
+      <span style="min-width:90px;font-weight:${isBest?700:400}">
+        ${label}${isBest?' ✓ best':''}
+      </span>
+      <div class="q-bar-bg">
+        <div class="q-bar" style="width:${pct}%;background:${col}"></div>
+      </div>
+      <span style="min-width:55px;text-align:right;font-weight:${isBest?700:400};color:${col}">
+        ${a.q.toFixed(2)}
+      </span>`;
     el.appendChild(div);
   }
 }
 
-function renderOrderList(){
-  const el=document.getElementById('order-list');
-  el.innerHTML='';
-  if(!state)return;
-  const orders=state.orders.slice(0,8);
-  if(orders.length===0){el.innerHTML='<div style="color:#aaa;font-size:12px;padding:4px 0">No active orders</div>';return;}
-  for(const o of orders){
-    const div=document.createElement('div');div.className='order-row';
-    const col=o.urgent?'#c62828':o.time_left<20?'#e65100':'#1a1a1a';
-    div.innerHTML=`<span>Order ${o.id} → node ${o.dest}</span>
-      <span style="color:${col};font-weight:500">${o.time_left}min left</span>
-      <span style="color:#aaa">D${o.assigned_to??'?'}</span>`;
-    el.appendChild(div);
+function renderOrders(){
+  const el=document.getElementById('order-list');el.innerHTML='';
+  const os=state.orders||[];
+  if(!os.length){el.innerHTML='<div style="color:#aaa;padding:4px 0">No active orders</div>';return;}
+  for(const o of os.slice(0,8)){
+    const d=document.createElement('div');d.className='o-row';
+    d.innerHTML=`<span>#${o.id} → node ${o.dest}</span>
+      <span class="${o.urgent?'o-urgent':'o-ok'}">${o.time_left}min</span>`;
+    el.appendChild(d);
   }
 }
 
 function renderTraffic(){
-  const el=document.getElementById('traffic-info');
-  if(!state)return;
-  const congested=state.edges.filter(e=>e.congested);
-  const learned=state.edges.filter(e=>e.learned_time!==null);
-  el.innerHTML=`
-    <div>Congested edges: <strong>${congested.length}</strong> of ${state.edges.length}</div>
-    <div>Edges with learned data: <strong>${learned.length}</strong></div>
-    <div style="margin-top:6px;color:#888">Rush hours: 8–10am, 5–7pm (2× slower)</div>
-    <div style="color:#888">Center nodes: 6,7,11,12,13,17,18</div>
-  `;
+  const cong=(state.edges||[]).filter(e=>e.congested).length;
+  const lrn=(state.edges||[]).filter(e=>e.learned!==null).length;
+  document.getElementById('traffic').innerHTML=
+    `Congested edges: <b>${cong}</b> / ${(state.edges||[]).length}<br>
+     Learned traffic data: <b>${lrn}</b> edges<br>
+     Rush hours: 8–10am, 5–7pm (2× slower)<br>
+     Center nodes: 6, 7, 11–13, 17, 18`;
+}
+
+function renderLog(){
+  const el=document.getElementById('log');el.innerHTML='';
+  for(const ev of state.events||[]){
+    const d=document.createElement('div');
+    d.className=ev.includes('LATE')?'ev-late':ev.includes('on-time')?'ev-ok':ev.includes('---')?'ev-ep':'';
+    d.textContent=ev;el.appendChild(d);
+  }
 }
 
 function drawGrid(){
   if(!state)return;
-  const cv=document.getElementById('grid');
-  const ctx=cv.getContext('2d');
-  const W=cv.width,H=cv.height,C=W/GRID_SIZE;
+  const cv=document.getElementById('grid'),ctx=cv.getContext('2d');
+  const W=cv.width,H=cv.height,C=W/GS;
   ctx.clearRect(0,0,W,H);
+  function pos(n){return{x:(n%GS)*C+C/2,y:Math.floor(n/GS)*C+C/2};}
 
-  function pos(n){return{x:(n%GRID_SIZE)*C+C/2,y:Math.floor(n/GRID_SIZE)*C+C/2};}
-
-  for(const e of state.edges){
+  for(const e of state.edges||[]){
     const p=pos(e.from),q=pos(e.to);
     ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);
-    if(e.congested){ctx.strokeStyle='#ef5350';ctx.lineWidth=3;}
-    else{ctx.strokeStyle='#e0e0e0';ctx.lineWidth=1;}
-    ctx.stroke();
+    ctx.strokeStyle=e.congested?'rgba(231,76,60,0.6)':'#e8e8e8';
+    ctx.lineWidth=e.congested?4:1.2;ctx.stroke();
+    if(e.congested&&e.learned){
+      const mx=(p.x+q.x)/2,my=(p.y+q.y)/2;
+      ctx.fillStyle='rgba(231,76,60,0.9)';
+      ctx.font=`bold ${Math.round(C*0.13)}px sans-serif`;
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(e.learned+'m',mx,my);
+    }
   }
 
-  for(const o of state.orders){
-    const p=pos(o.dest);
-    ctx.fillStyle=o.urgent?'#ef5350':'#ef9f27';
-    ctx.fillRect(p.x-7,p.y-7,14,14);
+  // highlight Q-value neighbors
+  const qa=state.q_actions||[];
+  if(qa.length>0){
+    const nums=qa.filter(a=>typeof a.node==='number').map(a=>a.q);
+    const mn=Math.min(...nums),mx=Math.max(...nums),rng=mx-mn||1;
+    const best=qa.filter(a=>typeof a.node==='number').reduce((a,b)=>a.q>b.q?a:b,{q:-Infinity,node:-1});
+    for(const a of qa){
+      if(typeof a.node!=='number')continue;
+      const p=pos(a.node);
+      const alpha=0.12+0.45*(a.q-mn)/rng;
+      ctx.beginPath();ctx.arc(p.x,p.y,C*0.35,0,Math.PI*2);
+      ctx.fillStyle=a.node===best.node?`rgba(41,128,185,${alpha})`:`rgba(189,189,189,${alpha})`;
+      ctx.fill();
+    }
+  }
+
+  for(const o of state.orders||[]){
+    const p=pos(o.dest),sz=C*0.22;
+    ctx.fillStyle=o.urgent?'#e74c3c':'#f39c12';
+    ctx.fillRect(p.x-sz,p.y-sz,sz*2,sz*2);
+    ctx.fillStyle='#fff';
+    ctx.font=`bold ${Math.round(sz)}px sans-serif`;
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(o.id,p.x,p.y);
   }
 
   for(let n=0;n<25;n++){
     const p=pos(n);
-    ctx.beginPath();ctx.arc(p.x,p.y,C*0.22,0,Math.PI*2);
+    ctx.beginPath();ctx.arc(p.x,p.y,C*0.17,0,Math.PI*2);
     ctx.fillStyle='#fff';ctx.fill();
-    ctx.strokeStyle='#ccc';ctx.lineWidth=1;ctx.stroke();
-    ctx.fillStyle='#999';ctx.font=`${Math.round(C*0.18)}px sans-serif`;
+    ctx.strokeStyle='#ccc';ctx.lineWidth=0.8;ctx.stroke();
+    ctx.fillStyle='#aaa';
+    ctx.font=`${Math.round(C*0.14)}px sans-serif`;
     ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(n,p.x,p.y);
   }
 
-  for(const d of state.drivers){
-    const p=pos(d.node);
-    if(d.dest!==null){
-      const q=pos(d.dest);
-      ctx.beginPath();ctx.setLineDash([5,5]);ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);
-      ctx.strokeStyle=COLS[d.id];ctx.lineWidth=1.5;ctx.stroke();ctx.setLineDash([]);
-    }
-    ctx.beginPath();ctx.arc(p.x,p.y,C*0.3,0,Math.PI*2);
-    ctx.fillStyle=COLS[d.id];ctx.fill();
-    ctx.fillStyle='#fff';ctx.font=`bold ${Math.round(C*0.22)}px sans-serif`;
-    ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('D'+d.id,p.x,p.y);
+  const d=state.driver;
+  if(d.dest!==null){
+    const p=pos(d.node),q=pos(d.dest);
+    ctx.beginPath();ctx.setLineDash([5,5]);
+    ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);
+    ctx.strokeStyle='#2980b9';ctx.lineWidth=2;ctx.stroke();ctx.setLineDash([]);
+  }
+
+  const p=pos(d.node);
+  ctx.beginPath();ctx.arc(p.x,p.y,C*0.3,0,Math.PI*2);
+  ctx.fillStyle='#2980b9';ctx.fill();
+  ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.stroke();
+  ctx.fillStyle='#fff';
+  ctx.font=`bold ${Math.round(C*0.2)}px sans-serif`;
+  ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('D0',p.x,p.y);
+  if(d.queue_len>0){
+    const bx=p.x+C*0.22,by=p.y-C*0.22;
+    ctx.beginPath();ctx.arc(bx,by,C*0.14,0,Math.PI*2);
+    ctx.fillStyle='#f39c12';ctx.fill();
+    ctx.fillStyle='#fff';
+    ctx.font=`bold ${Math.round(C*0.13)}px sans-serif`;
+    ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(d.queue_len,bx,by);
   }
 }
 
-function addLog(msg){
-  const el=document.getElementById('log');
-  const div=document.createElement('div');
-  const late=msg.includes('LATE');
-  const delivered=msg.includes('delivered');
-  if(late)div.className='late';
-  else if(delivered)div.className='delivered';
-  div.textContent=msg;
-  el.prepend(div);
-  if(el.children.length>60)el.removeChild(el.lastChild);
+function drawChart(){
+  const cv=document.getElementById('rchart'),ctx=cv.getContext('2d');
+  cv.width=cv.offsetWidth||520;cv.height=75;
+  const W=cv.width,H=cv.height;
+  ctx.clearRect(0,0,W,H);
+  const hist=state.reward_history||[];
+  if(hist.length<2)return;
+  const mn=Math.min(...hist),mx=Math.max(...hist),rng=mx-mn||1;
+  const pw=W/hist.length;
+  ctx.beginPath();
+  hist.forEach((v,i)=>{
+    const x=i*pw,y=H-(v-mn)/rng*(H-10)-5;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });
+  ctx.strokeStyle='#2980b9';ctx.lineWidth=1.5;ctx.stroke();
+  ctx.fillStyle='rgba(41,128,185,0.1)';
+  ctx.lineTo(hist.length*pw,H);ctx.lineTo(0,H);ctx.closePath();ctx.fill();
+  const last=hist[hist.length-1];
+  ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.textAlign='left';
+  ctx.fillText(`${hist.length} episodes · last: ${last.toFixed(1)}`,4,12);
 }
 
-fetchState();
+load();
 </script>
 </body>
 </html>
 """
 
-if __name__ == '__main__':
-    print("\n" + "="*50)
-    print("  Delivery Optimization Demo Server")
-    print("="*50)
-    print("  Open in browser: http://localhost:5000")
-    print("="*50 + "\n")
-    app.run(debug=False, port=5000)
+if __name__=="__main__":
+    print("\n"+"="*50)
+    print("  Q-Learning 1-Driver Delivery Demo")
+    print(f"  Agent: {AGENT_MODE.upper()}")
+    print("  Open: http://localhost:8080")
+    print("="*50+"\n")
+    app.run(debug=False, port=8080, host='0.0.0.0')
