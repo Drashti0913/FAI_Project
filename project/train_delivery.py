@@ -10,8 +10,8 @@ from rl_agent import QLearningAgent
 # ============================================================================
 # CHANGE THESE TWO LINES ONLY:
 # ============================================================================
-NUM_EPISODES = 1000  # How many episodes to train
-EPSILON_DECAY = 0.9977   # Decay rate (use table below)
+NUM_EPISODES = 1000000  # How many episodes to train
+EPSILON_DECAY = 0.9999977   # Decay rate (use table below)
 
 # Decay rate reference:
 # 1,000 episodes    → 0.9977
