@@ -2,16 +2,12 @@
 contains baseline agents for comparison with the RL agent.
 
 Two baselines:
-  RandomAgent   — picks a random neighbor at each step/ movement,
-                  orders are assigned by heuristic
-  GreedyAgent   — moves each driver one step closer to its next
-                  destination using Manhattan distance (greedy local search)
-
-Both agents plug into the existing DeliveryEnvironment.step(actions) interface,
-which expects a list of 3 action indices (one per driver), where each index
-maps to a neighbor in graph.get_neighbors(driver.current_node).
+  RandomAgent             - picks a random neighbor at each step/ movement,
+                            orders are assigned by heuristic
+  GreedyAgent             - moves each driver one step closer to its next
+                            destination using Manhattan distance (greedy local search)
 """
-
+import heapq
 import random
 from collections import deque
 from typing import List, Dict
@@ -61,18 +57,18 @@ class RandomAgent:
         """
         Returns one action per driver.
         Action = index into graph.get_neighbors(driver.current_node),
-        or 4 (stay) if the driver is idle or has no neighbors.
+        or len of neighbors (stay) if the driver is idle or has no neighbors.
         """
         actions = []
         for driver in env.drivers:
             if not driver.order_queue:
-                actions.append(4)  # idle — stay put
+                actions.append(len(env.graph.get_neighbors(driver.current_node)))  # idle
                 continue
             neighbors = env.graph.get_neighbors(driver.current_node)
             if neighbors:
                 actions.append(random.randint(0, len(neighbors) - 1))
             else:
-                actions.append(4)
+                actions.append(len(env.graph.get_neighbors(driver.current_node)))
         return actions
 
     def __repr__(self):
@@ -93,7 +89,7 @@ class GreedyAgent:
         actions = []
         for driver in env.drivers:
             if not driver.order_queue:
-                actions.append(4)  # idle
+                actions.append(len(env.graph.get_neighbors(driver.current_node)))  # idle
                 continue
 
             dest = env.orders[driver.order_queue[0]].destination
@@ -101,7 +97,7 @@ class GreedyAgent:
 
             if action == -1:
                 # Already at destination or no path, stay (delivery auto-triggers)
-                actions.append(4)
+                actions.append(len(env.graph.get_neighbors(driver.current_node))) # never a valid num
             else:
                 actions.append(action)
 
@@ -109,6 +105,8 @@ class GreedyAgent:
 
     def __repr__(self):
         return "GreedyAgent"
+
+
 
 
 def run_baseline_episode(agent, env: DeliveryEnvironment) -> Dict:
@@ -167,7 +165,7 @@ def run_baseline_episode(agent, env: DeliveryEnvironment) -> Dict:
 
 
 if __name__ == "__main__":
-    env = DeliveryEnvironment(num_drivers=3, grid_size=5,
+    env = DeliveryEnvironment(num_drivers=4, grid_size=10,
                               traffic_pattern='rush_hour',
                               order_arrival_rate=0.3)
 
