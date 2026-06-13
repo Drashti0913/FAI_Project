@@ -421,18 +421,6 @@ print(f"Completed {len(env.completed_orders)} orders")
 
 ---
 
-## Project Timeline
-
-- **Proposal:** May 15
-- **TA Check-in:** Week of May 25
-- **Implementation:** May 25 - June 10
-- **Demo & Walkthrough:** June 12
-- **Final Submission:** June 12
-
-**Total development time:** ~3 weeks with 2-day intensive implementation sprint
-
----
-
 ## References
 
 1. Sutton, R.S., & Barto, A.G. (2018). *Reinforcement Learning: An Introduction (2nd ed.)*. MIT Press. Core reference for Q-learning algorithm and epsilon-greedy exploration.
