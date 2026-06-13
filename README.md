@@ -437,12 +437,6 @@ AI tools were used to assist with code debugging, conceptual understanding, brai
 
 ---
 
-## License
-
-This project is submitted as coursework for CS 4100, Northeastern University, Summer 2026.
-
----
-
 ## Acknowledgments
 
-Special thanks to Professor Rajagopalvenkat and TA Andrei for guidance, feedback, and suggestions throughout project development, particularly regarding state space optimization and DQN recommendation for multi-driver scaling.
+Special thanks to Professor Rajagopalvenkat and TA Andrei for guidance, feedback, and support throughout the course.
