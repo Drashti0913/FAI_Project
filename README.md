@@ -162,22 +162,18 @@ Open browser: `http://localhost:5000`
 ```
 FAI_Project/project/
 │
-├── Core Implementation
-│   ├── delivery_env.py            # Simulation environment (200 lines)
-│   ├── assignment.py              # Assignment heuristic (150 lines)
-│   ├── rl_agent.py                # Q-learning agent (120 lines)
-│   └── dqn_agent.py               # DQN agent for large state spaces (150 lines)
+├── delivery_env.py                # Simulation environment (200 lines)
+├── assignment.py                  # Assignment heuristic (150 lines)
+├── rl_agent.py                    # Q-learning agent (120 lines)
+└── dqn_agent.py                   # DQN agent for large state spaces (150 lines)
 │
-├── Training Scripts
-│   ├── train_delivery.py         # Q-learning training (180 lines)
-│   └── train_dqn.py               # DQN training (200 lines)
+├── train_delivery.py              # Q-learning training (180 lines)
+├── train_dqn.py                   # DQN training (200 lines)
 │
-├── Evaluation
-│   ├── baselines.py               # Random and Greedy baselines (140 lines)
-│   └── evaluation.py              # Statistical analysis and plots (220 lines)
+├── baselines.py                   # Random and Greedy baselines (140 lines)
+│-── evaluation.py                 # Statistical analysis and plots (220 lines)
 │
-├── Visualization
-│   └── server.py                  # Flask web UI (350 lines)
+├── server.py                      # Flask web UI (350 lines)
 │
 └── Results
     ├── RL_with_1_driver/          # Single-driver training results
@@ -389,15 +385,6 @@ python train_delivery.py train
 # Monitor progress - updates every 1000 episodes
 # Saves checkpoints every 50k episodes
 # Final model: Q_table_final.pkl
-```
-
-### Evaluating Trained Agent
-
-```bash
-# Runs 30 test episodes and generates plots
-python evaluation.py
-
-# Check results/ folder for comparison plots
 ```
 
 ### Running Live Demo
