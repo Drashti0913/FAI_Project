@@ -115,13 +115,7 @@ python train_delivery.py train
 
 ### Baseline Comparison
 
-**Run all three agents (Random, Greedy, RL) and generate comparison plots:**
-
-```bash
-python evaluation.py
-```
-
-**Prerequisites:** `Q_table_final.pkl` must exist
+**Ran all three agents (Random, Greedy, RL) to generate comparison plots:**
 
 **What this does:**
 - Loads trained RL agent
