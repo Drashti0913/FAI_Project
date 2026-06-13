@@ -1,290 +1,394 @@
-# Intelligent Traffic-Aware Delivery Optimization
-**CS5100 · Foundation of Artificial Intelligence · Khoury College, Northeastern University**
+# Dynamic Multi-Order Delivery Optimization
+
+**CS 5100 - Artificial Intelligence | Khoury College, Northeastern University**
+
+**Team:** Venkata Sai Udayini Vedantham, Drashti Bhavsar, Elyssa Querubin
 
 ---
 
-## Team Members
-- Drashti Bhavsar: bhavsar.dr@northeastern.edu
-- Venkata Sai Udayini Vedantham
-- Elyssa Querubin
+## Overview
 
----
+### Problem Statement
 
-## Problem Overview
+Modern delivery services face a fundamental challenge: orders arrive continuously while drivers are already in motion. Existing systems treat routing as a static problem, computing paths once at dispatch time and executing them linearly. This fails to account for the dynamic nature of real delivery operations where new orders keep arriving and must be integrated into active routes without disrupting existing deliveries.
 
-Modern delivery systems fail under dynamic traffic conditions because traditional routing treats travel time as static. This project builds an intelligent dispatch system where 3 drivers operate on a 5×5 city grid, handling orders that arrive dynamically throughout an 8-hour simulated shift.
+This project addresses: **How should a delivery system manage a continuously growing set of orders for drivers already in motion, deciding both which drivers receive new orders and in what sequence to serve all pending deliveries, while minimizing customer wait time and learning from experience?**
 
-The system learns to dispatch orders efficiently **while simultaneously discovering traffic patterns from scratch** — without being told what those patterns are. This emergent traffic awareness is the core novelty of the project.
+### Our Approach
 
----
+We developed a two-component hybrid AI system:
 
-## What We Built (entirely from scratch)
+1. **Assignment Heuristic (Classical AI):** Simulation-based greedy optimization that selects which driver receives each new order and determines optimal queue positioning through exhaustive evaluation and local hill-climbing search.
 
-| Component | Description |
-|---|---|
-| 5×5 city graph | 25 nodes, 40 bidirectional edges, random base weights 5–15 min |
-| Traffic simulation | Rush-hour (8–10am, 5–7pm), uniform, and random congestion modes |
-| Order generator | Dynamic arrivals (30% probability/minute), 30-min hard deadlines |
-| Driver agents | Queue-based routing with A\* pathfinding, mid-route reassignment |
-| Q-learning agent | Tabular Q-table, epsilon-greedy exploration — **implemented from scratch** |
-| Traffic learning | Online running-average per edge per hour; agent discovers rush hour autonomously |
-| 3 baselines | Random, Round Robin, Greedy Nearest — all implemented from scratch |
+2. **Navigation Agent (Reinforcement Learning):** Q-learning agent that learns optimal routing through experience, discovering efficient paths and traffic patterns without prior knowledge.
 
-**No RL libraries used. No pre-trained models. All AI methods are custom Python implementations.**
+### Key Results
 
----
+**Single-Driver Validation (100,000 episodes, 14 minutes):**
+- Initial performance: -21,106 reward, 4.5% on-time delivery
+- Final performance: +3,325 reward, 85.6% on-time delivery
+- **Improvement: 81 percentage points**
+- Q-table coverage: 99.77% (379,223 unique states learned)
 
-## Key Results (2000 training episodes, rush hour traffic)
-
-| Metric | RL Agent | Random | Round Robin | Greedy Nearest |
-|---|---|---|---|---|
-| Total reward | −338 | −309 | −270 | −347 |
-| On-time % | 99.1% | 99.2% | 99.3% | 97.8% |
-| Avg wait (min) | 5.87 | 5.38 | 4.68 | 4.76 |
-| Missed deadlines | 0.44 | 0.40 | 0.35 | 1.08 |
-
-**Key finding:** The RL agent learns rush-hour congestion patterns on center nodes (6, 7, 11–13, 17–18) purely through experience — with zero prior knowledge of the traffic pattern. This emergent routing behavior is what separates it from all three baselines, which have no traffic awareness at all.
-
-Round Robin achieves lower average wait time through its fixed cycling strategy (perfect 17/17/16 load split every episode), but this is brittle hardcoded behavior — it cannot adapt to order urgency, driver position, or traffic conditions. The RL agent learns these trade-offs dynamically.
-
----
-
-## AI Methods Implemented from Scratch
-
-### Q-Learning Agent (`agents/q_agent.py`)
-- Tabular Q-table using Python `defaultdict`
-- Epsilon-greedy exploration with exponential decay (ε: 1.0 → 0.1)
-- Standard Bellman update: `Q(s,a) ← Q(s,a) + α[r + γ·max Q(s',a') − Q(s,a)]`
-- Valid-action masking (only legal queue positions considered)
-- Discount factor γ = 0.95, learning rate α = 0.1
-
-### A\* Pathfinding (`environment/city.py`)
-- Heuristic graph search over the 5×5 grid
-- Edge weights = base travel time × traffic multiplier
-- Uses **learned traffic estimates** as weights after warmup
-- Multi-stop route construction for queued orders
-
-### Traffic Learning (`environment/city.py`)
-- Running average update per edge per hour:
-  `new_avg = 0.9 × old_avg + 0.1 × observed_time`
-- Agent starts with no traffic knowledge; converges to true pattern
-- Automatically discovers 2× slowdown on rush-hour edges
-
-### Reward Function
-```
-TotalReward = −(TotalWaitTime) − (100 × MissedDeadlines)
-```
-Shaped intermediate reward during training:
-```
-StepReward = −(load_imbalance × 2.0) − (pending_orders × 1.5)
-```
-
-### View the interactive dashboard
-
-```
-Open `delivery_simulation_dashboard.html` directly in any browser — no server needed.
-```
----
-
-## Repository Structure
-
-```
-FAI_Project/
-│
-├── smoke_test.py              ← verify all components work (run this first)
-│
-├── environment/
-│   ├── __init__.py
-│   ├── city.py                ← 5×5 grid, A* routing, traffic learning
-│   ├── order.py               ← Order dataclass + dynamic generator
-│   ├── driver.py              ← Driver movement, queue management
-│   └── delivery_env.py        ← Main RL environment (reset / step / reward)
-│
-├── agents/
-│   ├── __init__.py
-│   ├── q_agent.py             ← Q-learning agent (from scratch)
-│   └── baselines.py           ← Random, RoundRobin, GreedyNearest baselines
-│
-├── training/
-│   ├── train.py               ← Training loop + baseline evaluation
-│   └── results.json           ← Saved training history (2000 episodes)
-│
-├── evaluation/
-│   ├── plot_results.py        ← Learning curves + comparison charts
-│   └── plots/                 ← All 8 generated figures
-│       ├── 01_learning_curves.png
-│       ├── 02_final_comparison.png
-│       ├── 03_city_grid.png
-│       ├── 04_traffic_heatmap.png
-│       ├── 05_episode_replay.png
-│       ├── 06_load_balance.png
-│       ├── 07_reward_distribution.png
-│       └── 08_epsilon_states.png
-│
-├── dashboard.py               ← Full visualization dashboard (generates all 8 plots)
-├── requirements.txt
-└── README.md
-```
+**Baseline Comparison (3 drivers):**
+- Random baseline: 12.5% on-time, -47k reward
+- Greedy baseline (BFS): 100% on-time, +8k reward
+- RL agent: Demonstrates learning and traffic awareness
 
 ---
 
 ## Setup Instructions
 
-### 1. Clone the repository
+### Prerequisites
+
+- Python 3.8 or higher
+- pip package manager
+
+### Installation
+
+1. **Clone the repository:**
 ```bash
-git clone https://github.com/Drashti0913/FAI_Project
-cd FAI_Project
+git clone <repository-url>
+cd delivery-optimization
 ```
 
-### 2. Create and activate a virtual environment
+2. **Install required packages:**
 ```bash
-python3 -m venv venv
-
-# Mac / Linux
-source venv/bin/activate
-
-# Windows
-venv\Scripts\activate
+pip install numpy matplotlib pygame flask tqdm torch
 ```
 
-### 3. Install dependencies
+**Package purposes:**
+- `numpy`: Array operations and numerical computations
+- `matplotlib`: Plotting and visualization
+- `pygame`: Real-time simulation visualization
+- `flask`: Web UI demo server
+- `tqdm`: Progress bars during training
+- `torch`: Neural network building blocks (for DQN variant, optional)
+
+### Verify Installation
+
 ```bash
-pip install -r requirements.txt
+python delivery_env.py
 ```
 
-### 4. Verify everything works
-```bash
-python3 smoke_test.py
-```
-
-Expected output:
-```
-Running smoke tests...
-  [OK] City: 40 edges, path 0→24 cost=62.0, len=9
-  [OK] Order: Order(id=0, dest=0, pending)
-  [OK] Driver: route to node 6 = [0, 5, 6]
-  [OK] Episode: 50 orders, reward=-221.0
-  [OK] Q-agent: epsilon=0.995, states=0
-5/5 tests passed
-```
+Should output: "Testing environment with random actions..." and complete successfully.
 
 ---
 
 ## Reproducing Results
 
-### Train the agent
+### 1. Single-Driver Q-Learning Training (Recommended First)
+
+Train the RL agent on single-driver validation:
+
 ```bash
-python3 training/train.py
-```
-Trains for 2000 episodes (~10 minutes). Saves results to `training/results.json`.
-Output example:
-```
-Ep  200 | avg reward: -460.8 | on-time: 97.9% | epsilon: 0.367 | states: 193
-Ep 2000 | avg reward: -354.7 | on-time: 99.0% | epsilon: 0.100 | states: 224
+python train_delivery.py train
 ```
 
-### Generate all visualizations
-```bash
-# Full dashboard (8 plots) — recommended
-python3 dashboard.py
-
-# Skip the epsilon curve re-training (faster)
-python3 dashboard.py --skip-epsilon
-
-# Learning curves + final comparison only
-python3 evaluation/plot_results.py
-```
-
-All plots saved to `evaluation/plots/`.
-
----
-
-## Visualization Output
-
-| Plot | Description |
-|---|---|
-| `01_learning_curves.png` | 4-panel: reward, on-time %, wait time, missed deadlines over 2000 episodes |
-| `02_final_comparison.png` | Grouped bar chart: RL vs all 3 baselines across all metrics |
-| `03_city_grid.png` | 5×5 city map: edge weights, rush zone, driver positions, pending orders |
-| `04_traffic_heatmap.png` | What the agent learned: edge speeds by hour (rush hour emergent) |
-| `05_episode_replay.png` | 6 snapshots of one episode showing driver movement and order dispatch |
-| `06_load_balance.png` | Violin plots of per-driver order counts across all agents |
-| `07_reward_distribution.png` | Box plots + rolling mean comparison |
-| `08_epsilon_states.png` | Epsilon decay and Q-table state discovery over training |
-
----
-
-## Simulation Parameters
-
-| Parameter | Value |
-|---|---|
-| Grid size | 5×5 (25 nodes, 40 edges) |
-| Number of drivers | 3 |
-| Episode duration | 480 minutes (8-hour shift) |
-| Order arrival rate | 30% probability per minute |
-| Order deadline | 30 minutes from arrival |
-| Max orders per episode | 50 |
-| Max queue per driver | 5 orders |
-| Action space | 18 (3 drivers × 6 queue positions) |
-| Rush hour nodes | 6, 7, 11, 12, 13, 17, 18 |
-| Rush hour multiplier | 2× during 8–10am and 5–7pm |
-
----
-
-## Traffic Patterns
-
-The environment supports three traffic modes, configurable at runtime:
-
+**Configuration:** Edit lines 11-12 in `train_delivery.py`:
 ```python
-env = DeliveryEnv(traffic_pattern="rush_hour")   # default
-env = DeliveryEnv(traffic_pattern="uniform")      # no congestion
-env = DeliveryEnv(traffic_pattern="random")       # 20% edges at 1.5×
+NUM_EPISODES = 100000
+EPSILON_DECAY = 0.999977
 ```
 
-The RL agent does **not** receive the traffic pattern as input. It must discover it.
+**Expected output:**
+- Training progress with tqdm bar
+- Checkpoints every 10k episodes
+- Final Q-table saved to `Q_table_final.pkl`
+- Learning curves saved to `training_100000.png`
+- Training time: ~15-20 minutes on standard laptop
+
+**Results to expect:**
+- Episode 10k: ~-21k reward, ~5% on-time
+- Episode 100k: ~0 reward, ~77% on-time
+- Final evaluation: ~85% on-time delivery
+
+### 2. Evaluation and Baseline Comparison
+
+Compare trained RL agent against baselines:
+
+```bash
+python evaluation.py
+```
+
+**Prerequisites:** `Q_table_final.pkl` must exist (from step 1)
+
+**What this does:**
+- Loads trained Q-table
+- Runs 30 episodes each: Random, Greedy, RL agents
+- Computes statistical metrics (mean, std, 95% CI)
+- Generates 4 comparison plots in `results/` folder
+
+**Expected results:**
+- Random: ~12% on-time
+- Greedy: ~100% on-time (BFS shortest path)
+- RL: ~85% on-time (learned policy with traffic awareness)
+
+### 3. Multi-Driver Training (Optional - Requires More Compute)
+
+For 3-driver system:
+
+**Option A: Tabular Q-Learning (High Memory)**
+```bash
+# Requires 8GB+ RAM
+# In delivery_env.py, set num_drivers=3
+python train_delivery.py train
+```
+
+**Option B: DQN (Lower Memory, Recommended for 3 drivers)**
+```bash
+# Uses neural network approximation
+python train_dqn.py train
+```
+
+**Note:** Multi-driver training requires significantly more episodes (500k+) and compute time (several hours).
+
+### 4. Live Web UI Demo
+
+Launch interactive visualization:
+
+```bash
+python server.py
+```
+
+Then open in browser: `http://localhost:5000`
+
+**Features:**
+- Real-time 5×5 city grid visualization
+- 3 drivers with smart assignment
+- Traffic patterns (rush hour highlighting)
+- Live statistics (completed orders, on-time %, avg wait)
+- Jump to different hours to see traffic effects
 
 ---
 
-## Dependencies
+## Code Organization
 
-```
-matplotlib>=3.7
-numpy>=1.24
-```
+### Core Components
 
-No PyTorch. No scikit-learn. No stable-baselines. No Gymnasium. No pre-trained models.
-All reinforcement learning and pathfinding implemented from scratch in pure Python.
+**`delivery_env.py`** (200 lines)
+- `DeliveryEnvironment`: Main simulation class
+- `CityGraph`: 5×5 grid graph with traffic patterns
+- `Driver`: Driver state and queue management
+- `Order`: Order representation with deadlines
+- Implements action-based step function for RL control
+- Tracks traffic data for learning
+
+**`assignment.py`** (150 lines)
+- `assign_order_to_driver()`: Simulation-based driver selection
+- `evaluate_queue()`: Multi-objective scoring function
+- `locally_optimize_queue()`: Hill-climbing queue optimization
+- `_bfs_path()`: Breadth-first search for travel time estimation
+- Implements classical AI optimization heuristics
+
+**`rl_agent.py`** (120 lines)
+- `QLearningAgent`: Tabular Q-learning implementation
+- `discretize_state()`: State encoding (active drivers only)
+- `select_action()`: Epsilon-greedy action selection
+- `update()`: Q-learning Bellman update rule
+- Sparse Q-table storage (dictionary-based)
+
+**`dqn_agent.py`** (150 lines) [Optional - for large state spaces]
+- `DQNAgent`: Deep Q-Network implementation
+- `DQNNetwork`: Neural network architecture (PyTorch)
+- Experience replay buffer
+- Handles millions of states with fixed memory
+
+### Training and Evaluation
+
+**`train_delivery.py`** (180 lines)
+- Training loop for tabular Q-learning
+- Progress tracking with tqdm
+- Metric logging (reward, on-time %, completions)
+- Learning curve generation
+- Checkpoint saving
+
+**`train_dqn.py`** (200 lines) [Optional]
+- DQN training with experience replay
+- Neural network optimization
+- For multi-driver large state spaces
+
+**`baselines.py`** (140 lines)
+- `RandomAgent`: Random movement baseline
+- `GreedyAgent`: BFS shortest-path baseline
+- `run_baseline_episode()`: Baseline evaluation framework
+
+**`evaluation.py`** (220 lines)
+- Loads trained models
+- Runs comparison experiments
+- Statistical analysis (mean, std, 95% CI)
+- Generates 4 comparison plots
+
+### Visualization
+
+**`server.py`** (350 lines)
+- Flask web server for live demo
+- Real-time grid visualization
+- Traffic pattern highlighting
+- Event logging and statistics
+- Interactive controls (play/pause, speed, time jump)
+
+**`visualize_pygame.py`** (250 lines) [Optional]
+- Pygame-based standalone visualization
+- Real-time driver movement
+- Order tracking
+- Stats panel
+
+### Documentation
+
+**`environment_spec.pdf`**
+- Complete environment specification
+- State/action space details
+- Reward function breakdown
+
+**`methods_reference.pdf`**
+- All algorithms explained
+- From-scratch vs library usage justification
+- Team contributions
 
 ---
 
-## Individual Contributions
+## Project Structure
 
-| Member | Contributions |
-|---|---|
-| Drashti Bhavsar | Q-learning agent, environment design, training loop, reward function, dashboard |
-| Venkata Sai Udayini Vedantham | City graph, A* routing, traffic simulation, traffic learning module |
-| Elyssa Querubin | Driver logic, order generator, baselines, evaluation plots, project summary |
+```
+delivery-optimization/
+├── README.md                      # This file
+│
+├── Core Implementation
+│   ├── delivery_env.py            # Simulation environment
+│   ├── assignment.py              # Classical AI assignment heuristic
+│   ├── rl_agent.py                # Tabular Q-learning agent
+│   └── dqn_agent.py               # Deep Q-Network agent (optional)
+│
+├── Training
+│   ├── train_delivery.py         # Q-learning training script
+│   └── train_dqn.py               # DQN training script (optional)
+│
+├── Evaluation
+│   ├── baselines.py               # Baseline agent implementations
+│   └── evaluation.py              # Comparison experiments and plots
+│
+├── Visualization
+│   ├── server.py                  # Web UI demo
+│   └── visualize_pygame.py        # Pygame visualization (optional)
+│
+├── Documentation
+│   ├── environment_spec.pdf       # Environment details
+│   ├── methods_reference.pdf      # Algorithms explained
+│   └── proposal.pdf               # Original project proposal
+│
+└── Results (generated after training)
+    ├── Q_table_final.pkl          # Trained Q-table
+    ├── training_100000.png        # Learning curves
+    └── results/                   # Comparison plots
+        ├── comparison.png
+        ├── learning_curve.png
+        ├── ontime_curve.png
+        └── wait_curve.png
+```
 
 ---
 
-## Limitations and Future Work
+## Implementation Highlights
 
-**Current limitations:**
-- Tabular Q-learning does not scale to larger grids; state space grows with city size
-- Reward signal is delayed (episode-end), making credit assignment difficult
-- Round Robin achieves better average wait time through hardcoded perfect load balancing
+### Algorithms Implemented From Scratch
 
-**Future directions:**
-- Replace tabular Q-learning with Deep Q-Network (DQN) for continuous state spaces
-- Add multi-agent RL where drivers coordinate with each other
-- Extend to real city graphs using OpenStreetMap data
-- Add vehicle capacity constraints and restaurant pickup locations
+**Classical AI:**
+1. BFS (Breadth-First Search) pathfinding
+2. Simulation-based greedy optimization
+3. Multi-objective scoring function
+4. Hill-climbing (local search)
+
+**Reinforcement Learning:**
+1. Q-learning (Bellman equation)
+2. Epsilon-greedy exploration
+3. Temporal difference learning
+4. Experience replay (DQN variant)
+
+**No machine learning libraries used** (no sklearn, no stable-baselines). PyTorch used only for neural network building blocks in DQN variant, per course guidelines.
+
+### Key Design Decisions
+
+**State Space Optimization:** Only encode active drivers (those with orders). Idle driver positions don't contribute to navigation learning. Reduces effective state space from billions to millions.
+
+**Two-Layer Architecture:** Assignment handles strategic decisions (which driver, what order), RL handles tactical execution (how to navigate). Clear separation of concerns.
+
+**Reward Shaping:** Progressive training - strong guidance early (epsilon > 0.3), pure objective later (epsilon < 0.3). Accelerates learning without biasing final policy.
+
+**Traffic Learning:** Agent discovers traffic patterns through experience. No hardcoded rush hours - learns that certain edges are slow at certain times through reward penalties.
+
+---
+
+## Training Hyperparameters
+
+**Q-Learning (Tabular):**
+- Learning rate (alpha): 0.1
+- Discount factor (gamma): 0.95
+- Epsilon: 1.0 → 0.1 (decay: 0.999977 for 100k episodes)
+- Episodes: 100k (single-driver), 500k+ (multi-driver)
+
+**DQN (Neural Network):**
+- Network: 10 → 64 → 64 → 125
+- Learning rate: 0.001
+- Batch size: 32
+- Memory buffer: 10,000 experiences
+- Episodes: 50k recommended
+
+---
+
+## Troubleshooting
+
+**Issue: Training runs out of memory**
+- Solution: Use single-driver validation first, or switch to DQN for multi-driver
+
+**Issue: Reward not improving**
+- Check: Is epsilon decaying correctly?
+- Check: Are deliveries happening? (should see +100 rewards)
+- Solution: Increase progress shaping strength (±10 instead of ±0.5)
+
+**Issue: Web UI not displaying**
+- Check: Is server running? (`python server.py`)
+- Check: Browser console for errors (F12)
+- Solution: Verify all dependencies installed
+
+---
+
+## Team Contributions
+
+**Venkata Sai Udayini Vedantham:**
+- RL navigation agent implementation (Q-learning and DQN)
+- State space design and discretization
+- Training loop and evaluation framework
+- Environment modifications for RL control
+
+**Drashti Bhavsar:**
+- Assignment heuristic implementation
+- BFS pathfinding for travel time estimation
+- Queue evaluation and optimization
+- Simulation-based driver selection
+
+**Elyssa Querubin:**
+- Baseline agent implementations (Random, Greedy)
+- Statistical analysis and comparison plots
+- Web UI development and integration
+- Visualization and demo preparation
 
 ---
 
 ## References
 
-1. Sutton, R. S., & Barto, A. G. (2018). *Reinforcement Learning: An Introduction* (2nd ed.). MIT Press.
-2. Hart, P. E., Nilsson, N. J., & Raphael, B. (1968). A formal basis for the heuristic determination of minimum cost paths. *IEEE Transactions on Systems Science and Cybernetics*, 4(2), 100–107.
-3. Watkins, C. J. C. H., & Dayan, P. (1992). Q-learning. *Machine Learning*, 8, 279–292.
-4. Russell, S., & Norvig, P. (2020). *Artificial Intelligence: A Modern Approach* (4th ed.). Pearson.
+- Russell, S. & Norvig, P. *Artificial Intelligence: A Modern Approach* - Chapters on Search and MDPs
+- Watkins, C.J.C.H. & Dayan, P. Q-learning. *Machine Learning*, 8, 279-292 (1992)
+- Mnih, V. et al. Human-level control through deep reinforcement learning. *Nature* 518, 529-533 (2015) [DQN]
+
+---
+
+## License
+
+This project is submitted as coursework for CS 5100, Northeastern University.
+
+---
+
+## Acknowledgments
+
+Special thanks to Professor Rajagopalvenkat and TA Andrei for guidance and feedback throughout the project development.
